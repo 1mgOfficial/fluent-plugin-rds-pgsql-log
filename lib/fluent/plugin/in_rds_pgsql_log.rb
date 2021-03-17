@@ -222,7 +222,7 @@ class Fluent::Plugin::RdsPgsqlLogInput < Fluent::Plugin::Input
           if record_group[grouping_match[:database]].nil?
             record_group[grouping_match[:database]] = {
               'message' => grouping_match[:message],
-              'time' => grouping_match[:time]},
+              'time' => grouping_match[:time],
               'host' => grouping_match[:host],
               'user' => grouping_match[:user],
               'database' => grouping_match[:database],
