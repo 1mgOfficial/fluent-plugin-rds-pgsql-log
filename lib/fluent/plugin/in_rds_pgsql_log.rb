@@ -7,8 +7,8 @@ class Fluent::Plugin::RdsPgsqlLogInput < Fluent::Plugin::Input
 
   helpers :timer
 
-  GROUPING_LOG_REGEXP = /^(?<time>\d{4}-\d{2}-\d{2} \d{2}\:\d{2}\:\d{2} .+?):(?<host>.*?):(?<user>.*?)@(?<database>.*?):\[(?<pid>.*?)\]:(?<message_level>.*?):(?<message>.*)$/
-  STATEMENT_REGEXP = /^(?<time>\d{4}-\d{2}-\d{2} \d{2}\:\d{2}\:\d{2} .+?):(?<host>.*?):(?<user>.*?)@(?<database>.*?):\[(?<pid>.*?)\]:(?<message_level>.*?):(\s*)duration:(\s*)(?<duration>.*?)(\s)(?<duration_unit>.*?)(\s*)statement:(\s*)(?<message>.*)$/
+  LOG_REGEXP = /^(?<time>\d{4}-\d{2}-\d{2} \d{2}\:\d{2}\:\d{2} .+?):(?<host>.*?):(?<user>.*?)@(?<database>.*?):\[(?<pid>.*?)\]:(?<message_level>.*?):(?<message>.*)$/
+  STATEMENT_DURATION_REGEXP = /^(\s*)duration:(\s*)(?<duration>.*?)(\s)(?<duration_unit>.*?)(\s).*$/
 
   config_param :access_key_id, :string, :default => nil
   config_param :secret_access_key, :string, :default => nil
@@ -188,62 +188,44 @@ class Fluent::Plugin::RdsPgsqlLogInput < Fluent::Plugin::Input
     begin
       log.debug "raw_records.count: #{raw_records.count}"
       record = nil
-      record_group = {}
-
       raw_records.each do |raw_record|
         log.debug "raw_record=#{raw_record}"
+        line_match = LOG_REGEXP.match(raw_record)
 
-        statement_match = STATEMENT_REGEXP.match(raw_record)
-        grouping_match = GROUPING_LOG_REGEXP.match(raw_record)
-
-        if statement_match
-          if !record_group.empty?
-            emit_grouped_records(record_group)
-            record_group = {}
-          end
+        unless line_match
+          # combine chain of log
+          record["message"] << "\n" + raw_record unless record.nil?
+        else
+          # emit before record
+          router.emit(@tag, event_time_of_row(record), record) unless record.nil?
 
           # set a record
           record = {
-            'time' => statement_match[:time],
-            'host' => statement_match[:host],
-            'user' => statement_match[:user],
-            'database' => statement_match[:database],
-            'pid' => statement_match[:pid],
-            'duration' => statement_match[:duration],
-            'duration_unit' => statement_match[:duration_unit],
-            'message_level' => statement_match[:message_level],
-            'message' => statement_match[:message],
-            'log_file_name' => log_file_name,
+            "time" => line_match[:time],
+            "host" => line_match[:host],
+            "user" => line_match[:user],
+            "database" => line_match[:database],
+            "pid" => line_match[:pid],
+            "message_level" => line_match[:message_level],
+            "message" => line_match[:message],
+            "log_file_name" => log_file_name,
           }
 
-          # emit before record
-          router.emit(@tag, event_time_of_row(record), record)
-        else
-          if record_group[grouping_match[:database]].nil?
-            record_group[grouping_match[:database]] = {
-              'message' => grouping_match[:message],
-              'time' => grouping_match[:time],
-              'host' => grouping_match[:host],
-              'user' => grouping_match[:user],
-              'database' => grouping_match[:database],
-              'pid' => grouping_match[:pid],
-              'message_level' => grouping_match[:message_level],
-              'message' => grouping_match[:message],
-              'log_file_name' => log_file_name
-            }
-          else
-            record_group[grouping_match[:database]]['message'] << "\n" << grouping_match[:message]
+          duration_match = STATEMENT_DURATION_REGEXP.match(line_match[:message])
+          if duration_match
+            record["duration"] = duration_match[:duration]
+            record["duration_unit"] = duration_match[:duration_unit]
           end
         end
       end
-
-
-      # emit grouped records
-      emit_grouped_records(record_group) unless record_group.empty?
+      # emit last record
+      router.emit(@tag, event_time_of_row(record), record) unless record.nil?
     rescue => e
       log.warn e.message
     end
   end
+
+
 
   def emit_grouped_records(record_group)
     record_group.each do |database, record|
